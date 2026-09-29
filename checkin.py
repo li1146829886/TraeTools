@@ -25,9 +25,12 @@ import datetime
 import json
 import os
 import random
+import smtplib
 import sys
 import time
 import urllib.request
+from email.mime.text import MIMEText
+from email.header import Header
 
 BASE = "https://api.trae.cn"
 
@@ -92,6 +95,29 @@ def notify_feishu(webhook, text):
             return resp.status
     except Exception:
         return None
+
+
+def notify_email(text):
+    """通过 QQ 邮箱 SMTP_SSL(465) 推送；仅需 EMAIL_USER 和 EMAIL_PASSWORD 两个环境变量，
+    发件人=收件人（自己给自己发）；缺一则跳过；失败静默打印，不影响签到主流程。"""
+    user = os.environ.get("EMAIL_USER", "").strip()
+    password = os.environ.get("EMAIL_PASSWORD", "").strip()
+    if not (user and password):
+        return False
+    try:
+        msg = MIMEText(text, "plain", "utf-8")
+        msg["From"] = Header("Trae签到助手 <%s>" % user, "utf-8")
+        msg["To"] = user
+        subject_ok = bool(text) and ("失败" not in text)
+        msg["Subject"] = Header("Trae 签到 %s - %s" % ("成功" if subject_ok else "异常", beijing_now_str()[:10]), "utf-8")
+        with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=15) as smtp:
+            smtp.login(user, password)
+            smtp.sendmail(user, [user], msg.as_string())
+        print("[邮件] 已推送到 %s" % user)
+        return True
+    except Exception as e:
+        print("[邮件] 发送失败: %s" % e)
+        return False
 
 
 def beijing_now_str():
@@ -168,14 +194,17 @@ def main():
             fail_names.append(name)
             all_ok = False
 
-    # 汇总一条飞书推送（无论成功/失败都汇总，webhook 为空则跳过）
+    # 汇总推送（无论成功/失败都汇总；飞书 webhook 和邮件 SMTP 均配了才发，缺一则跳过）
     summary = ["Trae 多账号签到结果", "时间：%s" % beijing_now_str()]
     if ok_names:
         summary.append("成功：" + "、".join(ok_names))
     if fail_names:
         summary.append("失败：" + "、".join(fail_names))
-    if webhook and (ok_names or fail_names):
-        notify_feishu(webhook, "\n".join(summary))
+    summary_text = "\n".join(summary)
+    if ok_names or fail_names:
+        if webhook:
+            notify_feishu(webhook, summary_text)
+        notify_email(summary_text)
 
     if not all_ok:
         sys.exit(1)
