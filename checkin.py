@@ -30,7 +30,7 @@ import sys
 import time
 import urllib.request
 from email.mime.text import MIMEText
-from email.header import Header
+from email.utils import formataddr
 
 BASE = "https://api.trae.cn"
 
@@ -106,10 +106,10 @@ def notify_email(text):
         return False
     try:
         msg = MIMEText(text, "plain", "utf-8")
-        msg["From"] = Header("Trae签到助手 <%s>" % user, "utf-8")
+        msg["From"] = formataddr(("Trae签到助手", user))
         msg["To"] = user
         subject_ok = bool(text) and ("失败" not in text)
-        msg["Subject"] = Header("Trae 签到 %s - %s" % ("成功" if subject_ok else "异常", beijing_now_str()[:10]), "utf-8")
+        msg["Subject"] = "Trae 签到 %s - %s" % ("成功" if subject_ok else "异常", beijing_now_str()[:10])
         with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=15) as smtp:
             smtp.login(user, password)
             smtp.sendmail(user, [user], msg.as_string())
