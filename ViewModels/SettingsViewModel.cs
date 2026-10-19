@@ -90,6 +90,38 @@ public partial class SettingsViewModel : ViewModelBase
 
     private int _lastUpdatePct = -1;
 
+    /// <summary>是否已屏蔽客户端自动更新检查（对应客户端配置 update.mode = manual）。</summary>
+    [ObservableProperty]
+    private bool _suppressClientUpdate;
+
+    /// <summary>当前客户端 update.mode 取值展示（未设置时显示占位符）。</summary>
+    [ObservableProperty]
+    private string _updateModeText = "—";
+
+    /// <summary>开关变动立即写入客户端配置（同开机自启：无需点「保存设置」）。</summary>
+    partial void OnSuppressClientUpdateChanged(bool value)
+    {
+        try
+        {
+            var msg = UpdateGuard.Apply(value);
+            UpdateModeText = UpdateGuard.ReadMode() ?? "（未设置）";
+            PushStatus = msg;
+            AccountHelpers.AppLog("account", "", $"客户端更新开关：{(value ? "开启屏蔽" : "恢复检查")}，update.mode={UpdateModeText}");
+        }
+        catch (Exception ex)
+        {
+            // 写入失败：把 UI 回滚到配置的真实状态，避免开关显示与实际不一致
+            try
+            {
+                _suppressClientUpdate = UpdateGuard.IsSuppressed();
+                OnPropertyChanged(nameof(SuppressClientUpdate));
+                UpdateModeText = UpdateGuard.ReadMode() ?? "（未设置）";
+            }
+            catch { /* 忽略 */ }
+            PushStatus = "更新开关设置失败：" + ex.Message;
+        }
+    }
+
     public ObservableCollection<AccountInfo> Accounts { get; } = new();
 
     /// <summary>账号管理中当前选中的账号（联动 Token 面板显示对应凭证）。</summary>
@@ -137,6 +169,14 @@ public partial class SettingsViewModel : ViewModelBase
             }
         }
         catch { /* 保留默认值 */ }
+
+        // 客户端更新开关：直接读客户端配置初始化（写字段而非属性，避免构造期触发写入）
+        try
+        {
+            _suppressClientUpdate = UpdateGuard.IsSuppressed();
+            UpdateModeText = UpdateGuard.ReadMode() ?? "（未设置）";
+        }
+        catch { /* 读取失败保留默认值 */ }
 
         PopulateAccounts();
 
@@ -814,6 +854,8 @@ public partial class SettingsViewModel : ViewModelBase
             }
             var destDir = Path.GetDirectoryName(currentExe)!;
 
+            // 更新包先下到独立临时目录（不污染安装目录），校验通过后再解到安装目录内的暂存目录
+            var pkgDir = Path.Combine(Path.GetTempPath(), "TraeTools_update_" + Guid.NewGuid().ToString("N"));
             PushStatus = "开始下载新版…（请稍候）";
             try
             {
@@ -821,10 +863,33 @@ public partial class SettingsViewModel : ViewModelBase
                 {
                     if (pct / 10 != _lastUpdatePct) { _lastUpdatePct = pct / 10; PushStatus = $"下载 {pct}%…"; }
                 });
-                var update = await Task.Run(() => UpdaterService.DownloadAsync(rel.ExeUrl, destDir, p));
+                var pkg = await Task.Run(() => UpdaterService.DownloadAsync(rel.AssetUrl, pkgDir, rel.AssetName, p));
+
+                if (!UpdaterService.VerifySha256(pkg, rel.Sha256Hex))
+                {
+                    PushStatus = "更新包校验失败（SHA-256 不一致），已中止更新，请稍后重试。";
+                    try { Directory.Delete(pkgDir, recursive: true); } catch { /* 清理失败忽略 */ }
+                    return;
+                }
+
+                string staging;
+                if (rel.IsZip)
+                {
+                    PushStatus = "正在解包更新…";
+                    staging = UpdaterService.PreparePackage(pkg, destDir);
+                }
+                else
+                {
+                    // 兼容只发单文件 exe 的历史 Release：造一个只含 exe 的暂存目录，走同一套替换逻辑
+                    staging = Path.Combine(destDir, ".~update");
+                    if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+                    Directory.CreateDirectory(staging);
+                    File.Move(pkg, Path.Combine(staging, UpdaterService.AppExeName), overwrite: true);
+                }
+
                 PushStatus = "下载完成：即将退出并自动替换安装。";
-                UpdaterService.ApplyInBackground(update, currentExe);
-                // 必须彻底退出进程以释放目标 exe 文件锁，否则后台脚本 copy 永远失败
+                UpdaterService.ApplyInBackground(staging, destDir);
+                // 必须彻底退出进程以释放目标 exe 文件锁，否则后台脚本替换永远失败
                 await Task.Delay(400);
                 Environment.Exit(0);
             }
